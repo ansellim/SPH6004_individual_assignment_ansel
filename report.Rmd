@@ -1,0 +1,193 @@
+---
+title: 'SPH6004 Individual Assignment: Predicting ICU Discharge Using Machine Learning'
+author: 'Ansel Lim'
+date: "`r Sys.Date()`"
+output:
+  bookdown::pdf_document2:
+    toc: true
+    number_sections: true
+  bookdown::html_document2:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}    
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(corrplot)
+```
+
+```{r, include=FALSE}
+df_original <- read.csv("data/Assignment1_mimic dataset.csv", stringsAsFactors = FALSE)
+df <- readRDS("data/df.rds") #   after filtering out non-ICU patients and removing unwanted columns, but before train-test-split
+df_train <- readRDS("data/train.rds") # after train-test split, missingness-based filtering, imputation of missing values, standardization, and SMOTE
+```
+
+# Introduction
+
+## Dataset
+
+The MIMIC-IV (Medical Information Mart for Intensive Care IV) database is a large, freely available real-world electronic medical record data set comprising de-identified health data of patients who stayed in critical care units at the Beth Israel Deaconess Medical Center (BIDMC) in Boston, Massachusetts.
+
+The original dataset contains longitudinal data. However, our extracted dataset has already been temporally "flattened". Each record represents a snapshot of a patient's health status at the time of ICU admission, and does not account for the temporal evolution of clinical parameters over the course of an ICU stay. The features available for analysis span the following categories:
+
+- **Demographics:** age, sex, and race
+- **Severity of illness:** component scores of the Sequential Organ Failure Assessment (SOFA), capturing dysfunction across the respiratory, cardiovascular, coagulation, hepatic, renal, and central nervous systems
+- **Vital signs:** heart rate, systolic, diastolic, and mean arterial blood pressure, respiratory rate, temperature, and oxygen saturation (SpO2), each summarized as the minimum, maximum, and mean
+- **Glucose:** minimum, maximum, and mean blood glucose levels
+- **Neurological monitoring:** Glasgow Coma Scale (GCS) total and component scores (motor, verbal, eye-opening responses)
+- **Laboratory data**, comprising:
+  - *Hematology:* complete blood count (CBC) including CBC differential counts
+  - *Biochemistry:* renal panel/electrolytes, liver function tests, cardiac and muscle enzymes, as well as amylase
+  - *Coagulation parameters:* D-dimer, fibrinogen, thrombin time, INR, PT, and PTT
+  - *Arterial blood gas (ABG):* oxygen saturation (SO2) and partial pressure of oxygen (PO2)
+
+## Dataset preparation
+
+The pre-extracted dataset was preprocessed further.
+
+I restricted my analysis to patients admitted to one of eight recognized intensive care unit (ICU) types: the Medical ICU (MICU), Cardiac Vascular ICU (CVICU), Medical/Surgical ICU (MICU/SICU), Surgical ICU (SICU), Trauma SICU (TSICU), Coronary Care Unit (CCU), Neuro Surgical ICU (Neuro SICU), and the general ICU. After excluding records with missing discharge timestamps, the filtered dataset comprised `r nrow(df)` patients who have ever stayed in the ICU.
+
+I removed identifier columns (`subject_id`, `hadm_id`, and `stay_id`), care unit columns (`first_careunit`, `last_careunit`), timing variables (`intime`, `outtime`), leakage variables (`los`, `deathtime`, `hospital_expire_flag`) and ethically excluded variables (`insurance`, `language`, `marital_status`). I recoded the 33 original race categories into 7 broader groups of Asian, Black, Hispanic/Latino, Native American, White, Other Race, and Unknown.
+
+The dataset was split into a training set (70%) and test set (30%). Features with >10% missing values in the training set are dropped, leaving `r ncol(df_train) -1` out of `r ncol(df) - 1` features in the dataset. These are considered as candidate features for further preprocessing and analysis.
+
+Figure \@ref(fig:missingness) shows the % missingness in each candidate variable in the train and test sets, showing that all the numeric variables have missing values and that the distribution of missingness is similar between test and train sets.
+
+```{r missingness, echo=FALSE, fig.cap="Percentage of missing values per candidate variable in the train and test sets.", out.width="100%"}
+knitr::include_graphics("figures/missingness_plot_train_test.png")
+```
+
+Missing value imputation was performed using median imputation and then applied to the test set. Z-score standardization was fit on the training set and applied to both training and test sets. SMOTENC was applied to the train set to balance the minority class (ICU death), which handles the mix of categorical and numeric features by interpolating synthetic values for numeric features and assigning categories via majority vote among the k nearest neighbors. After preprocessing, the training and test sets were saved for downstream model fitting and evaluation.
+
+# Feature selection
+
+Feature selection is required in the MIMIC-IV dataset because several of the features are correlated with one another, for example the SOFA scores (Figure \@ref(fig:sofa-corr)). Inclusion of features that are correlated with one another may compromise predictive accuracy of the ICU discharge prediction model.
+
+```{r sofa-corr, echo=FALSE, fig.cap="Correlation matrix of SOFA component scores in the training set.", fig.width=5, fig.height=4.5}
+sofa_vars <- df_train[, grep("^sofa2", names(df_train))]
+sofa_labels <- gsub("sofa2_|_24h_max", "", names(sofa_vars))
+sofa_labels <- tools::toTitleCase(sofa_labels)
+sofa_labels[sofa_labels == "Cns"] <- "Neurological"
+sofa_labels[sofa_labels == "Respiration"] <- "Respiratory"
+names(sofa_vars) <- sofa_labels
+corrplot(cor(sofa_vars), method = "color", type = "lower",
+         addCoef.col = "black", number.cex = 0.7,
+         tl.col = "black", tl.srt = 45, tl.cex = 0.8,
+         cl.cex = 0.7, mar = c(0, 0, 0, 0))
+```
+
+## Feature selection methods
+
+I used logistic regression to select the right features for the predictive model.
+
+Methods used for feature selection:
+
+1. Forward stepwise selection
+2. Lasso regression (L1 regularization)
+3. Elastic net regression
+4. Boruta
+
+Forward stepwise selection is a greedy algorithm that starts from a null model and adds features one at a time. At each step, the features that reduces the Akaike information criterion the most is added. The model is parsimonious because the formula for AIC naturally accounts for model complexity.
+
+Lasso regression fits logistic regression with an L1 regularization penalty that tends to shrink coefficients of less important variables toward zero.
+
+Similar to lasso regression, elastic net regression is a regularized regression method, but differs in that it combines L1 and L2 regularization in the loss function. 
+
+Boruta is a wrapper around random forest methods that uses an all-relevant feature selection approach. The algorithm runs random forests and selects features with high feature importances compared to random permutations of the features.
+
+## What features were selected?
+
+```{r feature-selection-table, echo=FALSE, message=FALSE}
+library(knitr)
+library(kableExtra)
+
+lr_results <- read.csv("results/logistic_regression_results.csv",
+                       stringsAsFactors = FALSE)
+
+# only care about showing the feature sets for the feature-selected sets; do not need to show ALL THE CANDIDATE FEATURES.
+lr_results <- lr_results %>% filter(feature_set != "all")
+
+# All predictors in df_train (excluding target)
+all_features <- setdiff(names(df_train), "icu_death_flag")
+
+# Build a summary table: for each method, list selected and dropped features
+fs_table <- data.frame(
+  Method = c("Forward Stepwise", "Lasso", "Elastic Net", "Boruta"),
+  stringsAsFactors = FALSE
+)
+
+fs_table$`No. Selected` <- lr_results$n_features
+fs_table$`Selected Features` <- sapply(lr_results$features, function(f) {
+  paste(sort(strsplit(f, ";")[[1]]), collapse = ", ")
+})
+fs_table$`Dropped Features` <- sapply(lr_results$features, function(f) {
+  selected <- strsplit(f, ";")[[1]]
+  dropped <- setdiff(all_features, selected)
+  if (length(dropped) == 0) return("(none)")
+  paste(sort(dropped), collapse = ", ")
+})
+
+kable(fs_table, caption = "Features selected and dropped by each feature selection method.",
+      booktabs = TRUE, longtable = TRUE) %>%
+  kable_styling(latex_options = c("hold_position", "repeat_header"),
+                font_size = 8) %>%
+  column_spec(1, width = "1.8cm") %>%
+  column_spec(2, width = "1.2cm") %>%
+  column_spec(3, width = "6cm") %>%
+  column_spec(4, width = "5cm")
+```
+
+Table \@ref(tab:feature-selection-table) shows the features selected and dropped by each feature selection method. All four methods retained the SOFA component scores, GCS subscores, and key vital sign summaries. Forward stepwise selection was the most aggressive, retaining only `r lr_results$n_features[1]` features. Lasso was parsimonious as well but still selected `r lr_results$n_features[2]` features. Elastic net and Boruta both retained all `r length(all_features)` candidate features.
+
+# Predictive modeling
+
+## Methodology 
+
+The following models were fit to the data:
+
+1. Logistic regression
+2. Decision tree
+3. SVM
+4. XGBoost
+5. Adaboost
+
+## Model results
+
+Logistic regression models trained on training data using the four feature sets as well as the full list of candidate features had similar performance. All models had AUC 0.87, sensitivity 0.80, specificity 0.77, positive predictive value 0.97, and negative predictive value of 0.29. Table \@ref(tab:logistic-results) shows the test performance of logistic regression models trained with different feature selection strategies. Feature selection with stepwise or lasso regression managed to reduce the number of features to 26 (lasso) and 32 (stepwise) while maintaining similar performance.
+
+```{r logistic-results, echo=FALSE, message=FALSE}
+lr <- read.csv("results/logistic_regression_results.csv",
+               stringsAsFactors = FALSE)
+lr_display <- lr[, c("feature_set", "n_features", "AUC",
+                      "Sensitivity", "Specificity", "PPV", "NPV")]
+lr_display$feature_set <- c("Stepwise", "Lasso", "Elastic Net",
+                            "Boruta", "All Features")[seq_len(nrow(lr_display))]
+names(lr_display) <- c("Feature Set", "# Features", "AUC",
+                        "Sensitivity", "Specificity", "PPV", "NPV")
+kable(lr_display,
+      caption = "Test performance of logistic regression models by feature selection strategy.",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+Table \@ref(tab:dt-results) shows the test performance of decision tree models. Similar to the logistic regression models, reduction in the number of features from the full set (38 features) to a reduced set (26 features in lasso, 32 in stepwise) did not compromise the performance of the decision trees. Although decision trees had a poorer AUC compared to logistic regression, they had consistently superior sensitivity and negative predictive value. This means that compared to logistic regression, a decision tree is more likely to detect those patients who have a positive outcome of being discharged. Also, if a decision tree were to predict a negative patient outcome (i.e. the prediction is that the patient dies), the decision tree has a higher chance of being correct as compared to logistic regression.
+
+```{r dt-results, echo=FALSE, message=FALSE}
+dt <- read.csv("results/decision_tree_results.csv",
+               stringsAsFactors = FALSE)
+dt_display <- dt[, c("feature_set", "n_features",
+                     "AUC", "Sensitivity", "Specificity", "PPV", "NPV")]
+dt_display$feature_set <- c("Stepwise", "Lasso", "Elastic Net", "Boruta")
+names(dt_display) <- c("Feature Set", "# Features",
+                        "AUC", "Sensitivity", "Specificity", "PPV", "NPV")
+kable(dt_display,
+      caption = "Test performance of decision tree models by feature selection strategy.",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+# Declaration
+
+AI tools were used to generate and edit code according to my own analytical plans, as well as to help with understanding of documentation.
