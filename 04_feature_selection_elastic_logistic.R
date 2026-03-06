@@ -1,15 +1,8 @@
-# =============================================================================
-# 05_feature_selection_elastic_logistic.R
-# Elastic net logistic regression, alpha tuned via CV
-#
-# workflow:
-#   1. load 70/30 split
-#   2. for each alpha in {0.0, 0.1, ..., 1.0}:
-#        - cv.glmnet on df_train (5-fold CV, AUC) -> select lambda, record CV AUC
-#   3. pick best_alpha = argmax(CV AUC)
-#   4. refit final model on df_train with best_alpha, eval on df_test
-#   5. save model, selected features, results
-# =============================================================================
+# 04_feature_selection_elastic_logistic.R
+# DECLARATION: AI tools (Anthropic Claude Code) were used in the editing and development of this code.
+# Elastic net logistic regression for feature selection
+# Alpha is tuned via CV over a grid of 0 to 1 in steps of 0.1 (alpha=0 is Ridge, alpha=1 is LASSO)
+# Best alpha chosen by maximising CV AUC; lambda selected by lambda.min within that alpha
 
 start_time <- Sys.time()
 
@@ -26,11 +19,7 @@ df_train <- readRDS("data/train.rds")
 df_test  <- readRDS("data/test.rds")
 
 
-# -----------------------------------------------------------------------------
-# 2. Prepare model matrices
-#    glmnet needs numeric matrix
-#model.matrix does one-hot encoding
-# -----------------------------------------------------------------------------
+# glmnet requires a numeric matrix - model.matrix handles one-hot encoding of factors
 make_xy <- function(df, tgt) {
   X <- model.matrix(as.formula(paste("~", paste(setdiff(names(df), tgt), collapse = "+"))),
                     data = df)[, -1]   # drop intercept column
@@ -41,9 +30,7 @@ make_xy <- function(df, tgt) {
 train_xy <- make_xy(df_train, target)
 test_xy  <- make_xy(df_test,  target)
 
-# 3. alpha tuning via 5-fold CV on df_train
-#    for each alpha, cv.glmnet picks best lambda and records CV AUC
-#    alpha=0 -> Ridge; alpha=1 -> Lasso; in between -> elastic net
+# 3. alpha tuning - for each alpha value, cv.glmnet picks the best lambda and records its CV AUC
 alpha_grid <- seq(0, 1, by = 0.1)
 cv_auc     <- numeric(length(alpha_grid))
 cv_fits    <- vector("list", length(alpha_grid))
@@ -67,18 +54,16 @@ best_alpha <- alpha_grid[best_idx]
 alpha_summary <- data.frame(alpha = alpha_grid, CV_AUC = round(cv_auc, 4))
 print(alpha_summary, row.names = FALSE)
 
-# ---- 4. final model: refit on full df_train with best_alpha
+# 4. use the already-fitted cv object for the best alpha - no need to refit
 
 cv_final <- cv_fits[[best_idx]]   # already fitted on df_train with best_alpha
 
 best_lambda <- cv_final$lambda.min
 
-# selected features (nonzero coefficients, excl intercept)
 elastic_coefs <- coef(cv_final, s = "lambda.min")
-nonzero_idx   <- which(elastic_coefs[-1] != 0)   # drop intercept row
+nonzero_idx   <- which(elastic_coefs[-1] != 0)
 coef_names    <- rownames(elastic_coefs)[-1][nonzero_idx]
-
-# map dummy names back to orignal column names
+# collapse dummy names (e.g. "raceBlack") back to original column name
 selected_features_elastic <- unique(gsub("(race|gender).*", "\\1", coef_names))
 
 print(selected_features_elastic)
@@ -116,7 +101,6 @@ ppv         <- tp / (tp + fp)
 
 print(cm)
 
-# ------ 6. save
 dir.create("data", showWarnings = FALSE)
 
 saveRDS(cv_final,                   "data/elastic_model.rds")

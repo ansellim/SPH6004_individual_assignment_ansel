@@ -1,17 +1,13 @@
-# =============================================================================
 # 03_stepwise.R
+# DECLARATION: AI tools (Anthropic Claude Code) were used in the editing and development of this code.
 # Logistic regression with stepwise forward feature selection
-# Evaluation on held-out test set
-# Assumes that we have already partitioned the data into train and test sets, and that we have already performed 
-# =============================================================================
 
 start_time <- Sys.time()
 
 library(MASS)     # stepAIC
-library(pROC)     # AUC-ROC
-library(ggplot2)  # ROC curve plot
+library(pROC)
+library(ggplot2)
 
-# Set seed for reproducibility
 set.seed(42)
 
 # 1. load data
@@ -22,14 +18,12 @@ target <- "icu_death_flag"
 
 print(prop.table(table(df_train[[target]])))
 
-# -----------------------------------------------------------------------------
 # 2. Define null and full models for stepwise
 #    null model: intercept only
 #    full model: all 38 candidate features
 #    direction: "forward" - start from null, add one feature at a time
 #    criterion: AIC (penalizes model complexity via +2k per param)
 #    note: scope uses fitted model objects not formulas, so "." resolves correctly
-# -----------------------------------------------------------------------------
 null_model <- glm(as.formula(paste(target, "~ 1")),
                   data = df_train, family = binomial)
 full_model <- glm(as.formula(paste(target, "~ .")),
@@ -47,10 +41,9 @@ step_model <- stepAIC(
   trace     = TRUE    # set to FALSE to suppress per-step output
 )
 
-# ----- 3. selected features -----
+# 3. selected features
 selected_vars <- names(coef(step_model))[-1]   # drop "(Intercept)"
-
-# for factor variables stepAIC returns eg "raceBlack" - need to extract base name
+# stepAIC returns eg "raceBlack" - collapse back to base name
 selected_features <- unique(gsub("(race|gender).*", "\\1", selected_vars))
 
 print(selected_features)
@@ -65,9 +58,8 @@ log_loss <- function(actual, prob, eps = 1e-15) {
   -mean(actual * log(prob) + (1 - actual) * log(1 - prob))
 }
 
-# ---- 5. evaluate on test set
-# predicted probs for positive class (Discharged)
-# glm models P(second factor lvl) = P(DiedinICU); invert to get P(Discharged)
+# 5. evaluate on test set
+# glm models P(DiedinICU); invert to get P(Discharged)
 test_prob <- 1 - predict(step_model, newdata = df_test, type = "response")
 test_actual <- as.integer(df_test[[target]] == "Discharged")
 
@@ -116,7 +108,6 @@ logistic_results <- data.frame(
 )
 saveRDS(logistic_results, "data/logistic_results.rds")
 
-# ------- 7. ROC curve
 dir.create("figures", showWarnings = FALSE)
 
 roc_df <- data.frame(

@@ -1,18 +1,16 @@
-# =============================================================================
 # 02_data_split.R
+# DECLARATION: AI tools (Anthropic Claude Code) were used in the editing and development of this code.
 # data loading, preprocessing, train/test split, imputation, SMOTENC
-# =============================================================================
 
 library(dplyr)
 library(ggplot2)      # missingness plot
 library(caret)        # createDataPartition
 library(themis)       # smotenc
+
 set.seed(42)
 
-# -----------------------------------------------------------------------------
 # 0. Load and filter data
 # Drop leakage, identifier columns and other columns that I do not want to consider as covariates. Only use ICU patients. Recode race to have fewer levels.
-# -----------------------------------------------------------------------------
 df_raw <- read.csv("data/Assignment1_mimic dataset.csv", stringsAsFactors = FALSE)
 
 # List of units which I will consider as ICU units. The rest of the units are not considered as ICU units
@@ -69,7 +67,7 @@ df$race <- dplyr::case_when(
 )
 
 
-# ------- 1. Define target + all candidate features (missingness filter done post-split)
+# 1. Define target + all candidate features (missingness filter done post-split)
 target               <- "icu_death_flag"
 categorical_features <- c("race", "gender")
 numerical_features   <- setdiff(names(df)[sapply(df, is.numeric)], target)
@@ -88,11 +86,9 @@ df$gender <- factor(df$gender)
 dir.create("data", showWarnings = FALSE)
 saveRDS(df,  "data/df.rds")
 
-# ---------- 2. Stratified 70/30 train/test split ----------
 train_idx <- createDataPartition(df[[target]], p = 0.70, list = FALSE)
 df_train  <- df[ train_idx, ]
 df_test   <- df[-train_idx, ]
-
 
 print(round(prop.table(table(df_train[[target]])), 4))
 print(round(prop.table(table(df_test[[target]])),  4))
@@ -117,7 +113,7 @@ df_train <- df_train %>% select(all_of(c(selected_features, target)))
 df_test  <- df_test  %>% select(all_of(c(selected_features, target)))
 
 
-## Create histogram showing % missingness
+# create histogram showing % missingness
 
 df_train_x <- df_train %>% select(-icu_death_flag)
 df_test_x  <- df_test  %>% select(-icu_death_flag)
@@ -144,10 +140,8 @@ missingness_plot <- ggplot(miss_df, aes(x = variable, y = pct_missing)) +
 ggsave("figures/missingness_plot_train_test.png", plot = missingness_plot,
        width = 14, height = 6, dpi = 300)
 
-# -----------------------------------------------------------------------------
 # 3. Impute missing values with median (fit on train set only)
 # apply same medians to test set too
-# -----------------------------------------------------------------------------
 train_medians <- sapply(selected_num, function(f) median(df_train[[f]], na.rm = TRUE))
 
 impute_medians <- function(df, medians) {
@@ -159,11 +153,9 @@ df_train <- impute_medians(df_train, train_medians)
 df_test  <- impute_medians(df_test,  train_medians)
 
 
-# -----------------------------------------------------------------------------
 # 3b. z-score standardization - fit on train only, apply to both
 #     only numeric features scaled; race & gender left as factors.
 #     do this BEFORE smotenc so synthetic samples use standardized space
-# -----------------------------------------------------------------------------
 train_means <- sapply(selected_num, function(f) mean(df_train[[f]]))
 train_sds   <- sapply(selected_num, function(f) sd(df_train[[f]]))
 train_sds[train_sds == 0] <- 1   # avoid div by zero for constant cols
@@ -177,13 +169,11 @@ df_train <- zscore_scale(df_train, train_means, train_sds)
 df_test  <- zscore_scale(df_test,  train_means, train_sds)
 
 
-# -----------------------------------------------------------------------------
 # 4. SMOTENC on training set only
 #    handles numeric + categorical simultaneously
 #    numeric: linearly interpolated btwn neighbours
 #    categorical: majority vote among K neighbours
 #    over_ratio=1 -> balance minority to match majority
-# -----------------------------------------------------------------------------
 print(table(df_train[[target]]))
 
 df_train_pre_smote <- df_train   # keep a copy before SMOTE for partial-balance variant
