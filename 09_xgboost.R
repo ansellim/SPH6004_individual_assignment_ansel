@@ -24,10 +24,11 @@ df_train <- readRDS("data/train.rds")
 df_test  <- readRDS("data/test.rds")
 
 feature_sets <- list(
-  stepwise = readRDS("data/selected_features_stepwise.rds"),
-  lasso    = readRDS("data/selected_features_lasso.rds"),
-  elastic  = readRDS("data/selected_features_elastic.rds")
-  ,boruta   = readRDS("data/selected_features_boruta.rds")
+  candidate = readRDS("data/candidate_features.rds"),
+  stepwise  = readRDS("data/selected_features_stepwise.rds"),
+  lasso     = readRDS("data/selected_features_lasso.rds"),
+  elastic   = readRDS("data/selected_features_elastic.rds"),
+  boruta    = readRDS("data/selected_features_boruta.rds")
 )
 
 
@@ -66,6 +67,36 @@ n_s1_combos <- length(xgb_depth_grid) * length(xgb_eta_grid)
 n_s2_combos <- length(xgb_alpha_grid) * length(xgb_lambda_grid)
 total_fits  <- n_fs * (n_s1_combos + n_s2_combos + 1)
 fit_counter <- 0
+
+# ---- runtime estimate (times 1 xgb.cv on 15k subsample + 1 on full data) ----
+cat("=== Runtime Estimate ===\n")
+est_features <- feature_sets[[1]]
+est_cols     <- c(est_features, target)
+est_sub_idx  <- sample(nrow(df_train), min(15000, nrow(df_train)))
+est_params   <- list(objective = "binary:logistic", eval_metric = "auc",
+                     max_depth = 5, eta = 0.05, subsample = 0.7,
+                     min_child_weight = 20, alpha = 0, lambda = 1)
+
+est_dsub  <- make_xgb_matrix(df_train[est_sub_idx, est_cols], target)
+t0 <- Sys.time()
+xgb.cv(params = est_params, data = est_dsub, nfold = 5, nrounds = xgb_nrounds,
+       early_stopping_rounds = 20, verbose = 0)
+sec_sub <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+est_dfull <- make_xgb_matrix(df_train[, est_cols], target)
+t0 <- Sys.time()
+xgb.cv(params = est_params, data = est_dfull, nfold = 5, nrounds = xgb_nrounds,
+       early_stopping_rounds = 20, verbose = 0)
+sec_full <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+cat(sprintf("  1 xgb.cv on 15k subsample: %.1f sec\n", sec_sub))
+cat(sprintf("  1 xgb.cv on full %dk data:  %.1f sec  (%.1fx)\n",
+            round(nrow(df_train)/1000), sec_full, sec_full / sec_sub))
+cat(sprintf("  Total fits: %d\n", total_fits))
+cat(sprintf("  Estimated total runtime: %.1f min (%.1f hrs)\n\n",
+            sec_full * total_fits / 60, sec_full * total_fits / 3600))
+rm(est_dsub, est_dfull, est_features, est_cols, est_sub_idx, est_params, sec_sub, sec_full)
+
 loop_start  <- Sys.time()
 
 # 2. loop over feature sets

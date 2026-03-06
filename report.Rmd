@@ -11,11 +11,25 @@ output:
     number_sections: true
 ---
 
-```{r setup, include=FALSE}    
+```{r setup, include=FALSE}
 library(ggplot2)
 library(dplyr)
 library(tidyr)
 library(corrplot)
+
+# Helper: load a results CSV, normalise feature_set naming and ordering
+load_results <- function(path) {
+  df <- read.csv(path, stringsAsFactors = FALSE)
+  # unify "candidate" / "all" -> "All Features"
+  label_map <- c(candidate = "All Features", all = "All Features",
+                 stepwise = "Stepwise", lasso = "Lasso",
+                 elastic = "Elastic Net", boruta = "Boruta")
+  df$feature_set <- label_map[df$feature_set]
+  # enforce consistent order
+  desired_order <- c("All Features", "Stepwise", "Lasso", "Elastic Net", "Boruta")
+  df <- df[match(desired_order, df$feature_set), ]
+  df
+}
 ```
 
 ```{r, include=FALSE}
@@ -23,6 +37,10 @@ df_original <- read.csv("data/Assignment1_mimic dataset.csv", stringsAsFactors =
 df <- readRDS("data/df.rds") #   after filtering out non-ICU patients and removing unwanted columns, but before train-test-split
 df_train <- readRDS("data/train.rds") # after train-test split, missingness-based filtering, imputation of missing values, standardization, and SMOTE
 ```
+
+Code for this assignment is available on GitHub[^github].
+
+[^github]: <https://github.com/ansellim/SPH6004_individual_assignment_ansel>
 
 # Introduction
 
@@ -63,7 +81,13 @@ Missing value imputation was performed using median imputation and then applied 
 
 # Feature selection
 
-Feature selection is required in the MIMIC-IV dataset because several of the features are correlated with one another, for example the SOFA scores (Figure \@ref(fig:sofa-corr)). Inclusion of features that are correlated with one another may compromise predictive accuracy of the ICU discharge prediction model.
+Feature selection is required in the MIMIC-IV dataset because several of the features are correlated with one another, for example the SOFA scores (Figure \@ref(fig:sofa-corr)). 
+
+Reasons for feature selection include:
+
+1. Inclusion of features that are correlated with one another may compromise predictive accuracy of the ICU discharge prediction model.
+2. Limiting the number of features reduces the risk of overfitting.
+3. A model with a smaller number of features is more interpretable and more clinically useable because less input data is required. A model that requires a large number of features may not have high clinical utility because it may demand features for which data is not available at hand.
 
 ```{r sofa-corr, echo=FALSE, fig.cap="Correlation matrix of SOFA component scores in the training set.", fig.width=5, fig.height=4.5}
 sofa_vars <- df_train[, grep("^sofa2", names(df_train))]
@@ -82,20 +106,15 @@ corrplot(cor(sofa_vars), method = "color", type = "lower",
 
 I used logistic regression to select the right features for the predictive model.
 
-Methods used for feature selection:
+Methods used for feature selection were: (1) forward stepwise selection, (2) Lasso regression (L1 regularization), (3) Elastic net regression, and (4) Boruta.
 
-1. Forward stepwise selection
-2. Lasso regression (L1 regularization)
-3. Elastic net regression
-4. Boruta
-
-Forward stepwise selection is a greedy algorithm that starts from a null model and adds features one at a time. At each step, the features that reduces the Akaike information criterion the most is added. The model is parsimonious because the formula for AIC naturally accounts for model complexity.
+Forward stepwise selection is a greedy algorithm that starts from a null model and adds features one at a time. At each step, the features that reduce the Akaike information criterion the most is added. The model is parsimonious because the formula for AIC naturally accounts for model complexity.
 
 Lasso regression fits logistic regression with an L1 regularization penalty that tends to shrink coefficients of less important variables toward zero.
 
 Similar to lasso regression, elastic net regression is a regularized regression method, but differs in that it combines L1 and L2 regularization in the loss function. 
 
-Boruta is a wrapper around random forest methods that uses an all-relevant feature selection approach. The algorithm runs random forests and selects features with high feature importances compared to random permutations of the features.
+Boruta is a wrapper around random forest methods that uses an all-relevant feature selection approach rather than minimal-optimal selection approaches preferred by regularization-based techniques. The algorithm iteratively runs random forests. With each random forest, Boruta performs a three-way classification of features as confirmed, rejected, or tentative candidates; the features are classified  according to a comparison statistic calculated with respect to random permutations of features (shadow features). With increasing number of iterations, the decision on each feature is clearer.
 
 ## What features were selected?
 
@@ -158,12 +177,9 @@ The following models were fit to the data:
 Logistic regression models trained on training data using the four feature sets as well as the full list of candidate features had similar performance. All models had AUC 0.87, sensitivity 0.80, specificity 0.77, positive predictive value 0.97, and negative predictive value of 0.29. Table \@ref(tab:logistic-results) shows the test performance of logistic regression models trained with different feature selection strategies. Feature selection with stepwise or lasso regression managed to reduce the number of features to 26 (lasso) and 32 (stepwise) while maintaining similar performance.
 
 ```{r logistic-results, echo=FALSE, message=FALSE}
-lr <- read.csv("results/logistic_regression_results.csv",
-               stringsAsFactors = FALSE)
+lr <- load_results("results/logistic_regression_results.csv")
 lr_display <- lr[, c("feature_set", "n_features", "AUC",
                       "Sensitivity", "Specificity", "PPV", "NPV")]
-lr_display$feature_set <- c("Stepwise", "Lasso", "Elastic Net",
-                            "Boruta", "All Features")[seq_len(nrow(lr_display))]
 names(lr_display) <- c("Feature Set", "# Features", "AUC",
                         "Sensitivity", "Specificity", "PPV", "NPV")
 kable(lr_display,
@@ -175,16 +191,93 @@ kable(lr_display,
 Table \@ref(tab:dt-results) shows the test performance of decision tree models. Similar to the logistic regression models, reduction in the number of features from the full set (38 features) to a reduced set (26 features in lasso, 32 in stepwise) did not compromise the performance of the decision trees. Although decision trees had a poorer AUC compared to logistic regression, they had consistently superior sensitivity and negative predictive value. This means that compared to logistic regression, a decision tree is more likely to detect those patients who have a positive outcome of being discharged. Also, if a decision tree were to predict a negative patient outcome (i.e. the prediction is that the patient dies), the decision tree has a higher chance of being correct as compared to logistic regression.
 
 ```{r dt-results, echo=FALSE, message=FALSE}
-dt <- read.csv("results/decision_tree_results.csv",
-               stringsAsFactors = FALSE)
+dt <- load_results("results/decision_tree_results.csv")
 dt_display <- dt[, c("feature_set", "n_features",
                      "AUC", "Sensitivity", "Specificity", "PPV", "NPV")]
-dt_display$feature_set <- c("Stepwise", "Lasso", "Elastic Net", "Boruta")
 names(dt_display) <- c("Feature Set", "# Features",
                         "AUC", "Sensitivity", "Specificity", "PPV", "NPV")
 kable(dt_display,
       caption = "Test performance of decision tree models by feature selection strategy.",
       booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+Table \@ref(tab:svm-results) shows the test performance of SVM models.
+
+```{r svm-results, echo=FALSE, message=FALSE}
+svm_res <- load_results("results/svm_results.csv")
+svm_display <- svm_res[, c("feature_set", "n_features",
+                            "AUC", "Sensitivity", "Specificity", "PPV", "NPV")]
+names(svm_display) <- c("Feature Set", "# Features",
+                         "AUC", "Sensitivity", "Specificity", "PPV", "NPV")
+kable(svm_display,
+      caption = "Test performance of SVM models by feature selection strategy.",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+Table \@ref(tab:adaboost-results) shows the test performance for AdaBoost models.
+
+```{r adaboost-results, echo=FALSE, message=FALSE}
+ada <- load_results("results/adaboost_results.csv")
+ada_display <- ada[, c("feature_set", "n_features",
+                        "AUC", "Sensitivity", "Specificity", "PPV", "NPV")]
+names(ada_display) <- c("Feature Set", "# Features",
+                         "AUC", "Sensitivity", "Specificity", "PPV", "NPV")
+kable(ada_display,
+      caption = "Test performance of AdaBoost models by feature selection strategy.",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+Table \@ref(tab:xgboost-results) shows the test performance for XGBoost models.
+
+```{r xgboost-results, echo=FALSE, message=FALSE}
+xgb <- load_results("results/xgboost_results.csv")
+xgb_display <- xgb[, c("feature_set", "n_features",
+                         "AUC", "Sensitivity", "Specificity", "PPV", "NPV")]
+names(xgb_display) <- c("Feature Set", "# Features",
+                          "AUC", "Sensitivity", "Specificity", "PPV", "NPV")
+kable(xgb_display,
+      caption = "Test performance of XGBoost models by feature selection strategy.",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = "hold_position")
+```
+
+## Model comparison
+
+Table \@ref(tab:model-comparison) summarizes average test performance across feature sets for each model type. Figure \@ref(fig:roc-comparison) shows the ROC curves for each model type using the most parsimonious feature set (lasso, 26 features).
+
+While decision tree has a lower AUC than logistic regression, it has superior sensitivity and negative predictive value. The choice of model may depend on clinical considerations. For example, a clinician who prioritizes sensitivity for predicting who will be discharged from the ICU (maybe because they wish to make post-discharge plans) may prefer the decision tree. 
+
+```{r roc-comparison, echo=FALSE, fig.cap="ROC curves for the lasso-selected feature set (most parsimonious), evaluated on test data.", out.width="85%"}
+knitr::include_graphics("figures/roc_comparison_lasso.png")
+```
+
+```{r model-comparison, echo=FALSE, message=FALSE}
+lr <- load_results("results/logistic_regression_results.csv")
+dt <- load_results("results/decision_tree_results.csv")
+svm_comp <- load_results("results/svm_results.csv")
+ada_comp <- load_results("results/adaboost_results.csv")
+xgb_comp <- load_results("results/xgboost_results.csv")
+
+metrics <- c("AUC", "Sensitivity", "Specificity", "PPV", "NPV")
+
+lr_avg  <- colMeans(lr[, metrics])
+dt_avg  <- colMeans(dt[, metrics])
+svm_avg <- colMeans(svm_comp[, metrics])
+ada_avg <- colMeans(ada_comp[, metrics])
+xgb_avg <- colMeans(xgb_comp[, metrics])
+
+comparison <- data.frame(
+  Model = c("Logistic Regression", "Decision Tree", "SVM", "AdaBoost", "XGBoost"),
+  rbind(lr_avg, dt_avg, svm_avg, ada_avg, xgb_avg),
+  row.names = NULL
+)
+
+kable(comparison,
+      caption = "Average test performance by model type (across feature sets).",
+      booktabs = TRUE, digits = 4) %>%
   kable_styling(latex_options = "hold_position")
 ```
 

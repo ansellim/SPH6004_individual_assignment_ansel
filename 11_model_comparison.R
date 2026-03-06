@@ -64,3 +64,96 @@ best <- all_results[which.max(all_results$AUC), ]
 best <- all_results[which.max(all_results$Sensitivity), ]
 
 best_avg <- avg_results[which.max(avg_results$AUC), ]
+
+# ============================================================================
+# 5. ROC curves — lasso feature set (most parsimonious), evaluated on test data
+# ============================================================================
+library(pROC)
+library(rpart)
+
+df_train <- readRDS("data/train.rds")
+df_test  <- readRDS("data/test.rds")
+lasso_features <- readRDS("data/selected_features_lasso.rds")
+
+target <- "icu_death_flag"
+cols   <- c(lasso_features, target)
+actual <- as.integer(df_test[[target]] == "Discharged")
+
+# --- Logistic Regression ---
+lr_fit  <- glm(as.formula(paste(target, "~ .")),
+               data = df_train[, cols], family = binomial)
+lr_prob <- 1 - predict(lr_fit, newdata = df_test[, cols], type = "response")
+roc_lr  <- roc(actual, lr_prob, quiet = TRUE)
+
+# --- Decision Tree (best hyperparams from tuning) ---
+dt_res   <- read.csv("results/decision_tree_results.csv", stringsAsFactors = FALSE)
+dt_lasso <- dt_res[dt_res$feature_set == "lasso", ]
+dt_fit   <- rpart(as.formula(paste(target, "~ .")),
+                  data = df_train[, cols], method = "class",
+                  control = rpart.control(cp = dt_lasso$best_cp,
+                                          maxdepth = dt_lasso$best_depth))
+dt_prob <- predict(dt_fit, df_test[, cols], type = "prob")[, "Discharged"]
+roc_dt  <- roc(actual, dt_prob, quiet = TRUE)
+
+# --- SVM (best hyperparams from tuning, trained on train_small subsample) ---
+library(e1071)
+svm_res   <- read.csv("results/svm_results.csv", stringsAsFactors = FALSE)
+svm_lasso <- svm_res[svm_res$feature_set == "lasso", ]
+df_train_small <- readRDS("data/train_small.rds")
+set.seed(42)
+svm_sub <- df_train_small[sample(nrow(df_train_small), 10000), cols]
+svm_fit <- svm(as.formula(paste(target, "~ .")),
+               data = svm_sub, kernel = "radial",
+               cost = svm_lasso$best_cost, gamma = svm_lasso$best_gamma,
+               probability = TRUE, scale = FALSE)
+svm_pred <- predict(svm_fit, df_test[, cols], probability = TRUE)
+svm_prob <- attr(svm_pred, "probabilities")[, "Discharged"]
+roc_svm  <- roc(actual, svm_prob, quiet = TRUE)
+
+# --- AdaBoost (best hyperparams from tuning, trained on train_small) ---
+library(adabag)
+ada_res   <- read.csv("results/adaboost_results.csv", stringsAsFactors = FALSE)
+ada_lasso <- ada_res[ada_res$feature_set == "lasso", ]
+ada_fit   <- boosting(as.formula(paste(target, "~ .")),
+                      data = df_train_small[, cols],
+                      boos = TRUE, mfinal = ada_lasso$best_mfinal,
+                      control = rpart.control(maxdepth = ada_lasso$best_depth))
+ada_pred <- predict(ada_fit, df_test[, cols])
+ada_prob <- if (!is.null(colnames(ada_pred$prob))) ada_pred$prob[, "Discharged"] else ada_pred$prob[, 1]
+roc_ada  <- roc(actual, ada_prob, quiet = TRUE)
+
+# --- XGBoost (default params, trained on train_small) ---
+library(xgboost)
+make_xgb_matrix <- function(df, tgt) {
+  X <- model.matrix(as.formula(paste("~", paste(setdiff(names(df), tgt), collapse = "+"))),
+                    data = df)[, -1]
+  y <- as.integer(df[[tgt]] == "Discharged")
+  xgb.DMatrix(data = X, label = y)
+}
+dtrain_xgb <- make_xgb_matrix(df_train_small[, cols], target)
+dtest_xgb  <- make_xgb_matrix(df_test[, cols], target)
+xgb_fit <- xgb.train(
+  params  = list(objective = "binary:logistic", eval_metric = "auc",
+                 max_depth = 6, eta = 0.3, subsample = 0.7, nthread = 4),
+  data    = dtrain_xgb, nrounds = 100, verbose = 0)
+xgb_prob <- predict(xgb_fit, dtest_xgb)
+roc_xgb  <- roc(actual, xgb_prob, quiet = TRUE)
+
+# --- Plot ---
+model_colours <- c("steelblue", "tomato", "forestgreen", "darkorange", "purple")
+dir.create("figures", showWarnings = FALSE)
+png("figures/roc_comparison_lasso.png", width = 6, height = 5, units = "in", res = 300)
+plot(roc_lr,  col = model_colours[1], lwd = 2, main = "")
+plot(roc_dt,  col = model_colours[2], lwd = 2, add = TRUE)
+plot(roc_svm, col = model_colours[3], lwd = 2, add = TRUE)
+plot(roc_ada, col = model_colours[4], lwd = 2, add = TRUE)
+plot(roc_xgb, col = model_colours[5], lwd = 2, add = TRUE)
+legend("bottomright",
+       legend = c(sprintf("Logistic Regression (AUC = %.3f)", auc(roc_lr)),
+                  sprintf("Decision Tree (AUC = %.3f)", auc(roc_dt)),
+                  sprintf("SVM (AUC = %.3f)", auc(roc_svm)),
+                  sprintf("AdaBoost (AUC = %.3f)", auc(roc_ada)),
+                  sprintf("XGBoost (AUC = %.3f)", auc(roc_xgb))),
+       col = model_colours, lwd = 2, cex = 0.8)
+dev.off()
+cat("Saved figures/roc_comparison_lasso.png\n")

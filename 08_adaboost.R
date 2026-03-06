@@ -1,14 +1,14 @@
 # =============================================================================
 # 08_adaboost.R
-# adaboost evaluated on each of 4 feature sets
+# AdaBoost evaluated on 5 feature sets
 #
-# workflow (stepwise / lasso / elastic / boruta):
-#   1. hyperparam tuning - 5-fold CV on subsample of df_train (mfinal x maxdepth)
-#   2. final model on full df_train with best hyperparams
-#   3. eval on df_test: AUC, Sensitivity, Specificity, PPV, NPV
+# workflow (candidate/stepwise/lasso/elastic/boruta):
+#   1. hyperparam tuning - 3-fold CV on subsample (mfinal x maxdepth)
+#   2. final model on full train_small with best hyperparams
+#   3. eval on df_test
 #   4. save results
 #
-# note: adaboost is computationally expensive so CV tuning uses 10k subsample
+# Uses train_small.rds (smaller oversampling ratio) for speed
 # =============================================================================
 
 start_time <- Sys.time()
@@ -20,18 +20,19 @@ library(pROC)
 set.seed(42)
 
 target    <- "icu_death_flag"
-N_FOLDS   <- 5
+N_FOLDS   <- 3
 ADA_SUB_N <- 10000
 
 # ------ 1. load data and feature sets ------
-df_train <- readRDS("data/train.rds")
+df_train <- readRDS("data/train_small.rds")
 df_test  <- readRDS("data/test.rds")
 
 feature_sets <- list(
+  all      = readRDS("data/candidate_features.rds"),
   stepwise = readRDS("data/selected_features_stepwise.rds"),
   lasso    = readRDS("data/selected_features_lasso.rds"),
-  elastic  = readRDS("data/selected_features_elastic.rds")
-  ,boruta   = readRDS("data/selected_features_boruta.rds")
+  elastic  = readRDS("data/selected_features_elastic.rds"),
+  boruta   = readRDS("data/selected_features_boruta.rds")
 )
 
 
@@ -50,7 +51,7 @@ compute_metrics <- function(actual, prob, threshold = 0.5) {
 }
 
 ada_mfinal_grid <- c(50, 100)
-ada_depth_grid <- c(1, 2, 3)
+ada_depth_grid  <- c(1, 3)
 
 results <- data.frame()
 
@@ -60,7 +61,43 @@ n_combos <- length(ada_mfinal_grid) * length(ada_depth_grid)
 total_cv_fits  <- n_fs * n_combos * N_FOLDS
 total_fits     <- total_cv_fits + n_fs
 fit_counter    <- 0
-loop_start     <- Sys.time()
+
+# ------------- Runtime estimate -------------
+cat("=== AdaBoost Runtime Estimate ===\n")
+est_fs   <- feature_sets[[1]]
+est_cols <- c(est_fs, target)
+set.seed(99)
+est_idx  <- sample(nrow(df_train[, est_cols]), min(ADA_SUB_N, nrow(df_train)))
+est_df   <- df_train[est_idx, est_cols]
+est_fold <- sample(rep(1:N_FOLDS, length.out = nrow(est_df)))
+
+t0 <- Sys.time()
+boosting(as.formula(paste(target, "~ .")),
+         data = est_df[est_fold != 1, ],
+         boos = TRUE, mfinal = 50,
+         control = rpart.control(maxdepth = 1))
+cv_fit_sec <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+t0 <- Sys.time()
+boosting(as.formula(paste(target, "~ .")),
+         data = est_df,
+         boos = TRUE, mfinal = 50,
+         control = rpart.control(maxdepth = 1))
+final_fit_sec <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+n_cv_total    <- total_cv_fits
+n_final_total <- n_fs
+est_min       <- (cv_fit_sec * n_cv_total + final_fit_sec * n_final_total) / 60
+
+cat(sprintf("  CV fit: %.1f sec | final fit: %.1f sec\n", cv_fit_sec, final_fit_sec))
+cat(sprintf("  Total fits: %d CV + %d final = %d\n", n_cv_total, n_final_total, n_cv_total + n_final_total))
+cat(sprintf("  Estimated runtime: %.1f min (%.1f hrs)\n", est_min, est_min / 60))
+cat("=== Starting full run ===\n\n")
+
+rm(est_fs, est_cols, est_idx, est_df, est_fold, cv_fit_sec, final_fit_sec,
+   n_cv_total, n_final_total, est_min)
+
+loop_start <- Sys.time()
 
 # ---- 2. Loop over feature sets
 for (fs_i in seq_along(feature_sets)) {
@@ -74,9 +111,9 @@ for (fs_i in seq_along(feature_sets)) {
   df_tr <- df_train[, cols]
   df_te <- df_test[,  cols]
 
-  # subsample once per feature set, fixed folds accross hyperparam combos
+  # subsample once per feature set, fixed folds across hyperparam combos
   set.seed(42)
-  sub_idx  <- sample(nrow(df_tr), ADA_SUB_N)
+  sub_idx  <- sample(nrow(df_tr), min(ADA_SUB_N, nrow(df_tr)))
   df_sub   <- df_tr[sub_idx, ]
   fold_idx <- sample(rep(1:N_FOLDS, length.out = nrow(df_sub)))
 
@@ -92,7 +129,7 @@ for (fs_i in seq_along(feature_sets)) {
                              data    = df_sub[fold_idx != f, ],
                              boos    = TRUE, mfinal = mf_val,
                              control = rpart.control(maxdepth = md_val))
-        prob         <- { p <- predict(fit, df_sub[fold_idx == f, ]); if (!is.null(colnames(p$prob))) p$prob[, "Discharged"] else p$prob[, 2] }
+        prob         <- { p <- predict(fit, df_sub[fold_idx == f, ]); if (!is.null(colnames(p$prob))) p$prob[, "Discharged"] else p$prob[, 1] }
         actual_f     <- as.integer(df_sub[fold_idx == f, target] == "Discharged")
         fold_aucs[f] <- as.numeric(auc(roc(actual_f, prob, quiet = TRUE)))
         fit_counter  <- fit_counter + 1
@@ -111,7 +148,7 @@ for (fs_i in seq_along(feature_sets)) {
   cat(sprintf("  >> best: mfinal=%d, maxdepth=%d, CV_AUC=%.4f\n",
               best$mfinal, best$maxdepth, best$CV_AUC))
 
-  # final model on full df_train
+  # final model on full train_small
   cat(sprintf("  fitting final model on %d rows...\n", nrow(df_tr)))
   final_fit <- boosting(as.formula(paste(target, "~ .")),
                         data    = df_tr,
@@ -119,7 +156,7 @@ for (fs_i in seq_along(feature_sets)) {
                         control = rpart.control(maxdepth = best$maxdepth))
   fit_counter <- fit_counter + 1
 
-  prob   <- { p <- predict(final_fit, df_te); if (!is.null(colnames(p$prob))) p$prob[, "Discharged"] else p$prob[, 2] }
+  prob   <- { p <- predict(final_fit, df_te); if (!is.null(colnames(p$prob))) p$prob[, "Discharged"] else p$prob[, 1] }
   actual <- as.integer(df_te[[target]] == "Discharged")
   m      <- compute_metrics(actual, prob)
   cat(sprintf("  >> test AUC=%.4f  Sens=%.4f  Spec=%.4f\n", m$AUC, m$Sensitivity, m$Specificity))

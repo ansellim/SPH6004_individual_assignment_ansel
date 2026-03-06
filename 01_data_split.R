@@ -186,15 +186,23 @@ df_test  <- zscore_scale(df_test,  train_means, train_sds)
 # -----------------------------------------------------------------------------
 print(table(df_train[[target]]))
 
+df_train_pre_smote <- df_train   # keep a copy before SMOTE for partial-balance variant
 df_train <- smotenc(df_train, var = target, k = 5, over_ratio = 1)
 
 print(table(df_train[[target]]))
 
+# 4b. Partially-balanced training set for SVM (minority = 50% of majority)
+#     Smaller dataset speeds up SVM substantially.
+df_train_small <- smotenc(df_train_pre_smote, var = target, k = 5, over_ratio = 0.5)
+cat("df_train_small class balance:\n")
+print(table(df_train_small[[target]]))
+
 # 5. save
 dir.create("data", showWarnings = FALSE)
 
-saveRDS(df_train,  "data/train.rds")         # SMOTENC-balanced, scaled, factors intact
-saveRDS(df_test,       "data/test.rds")           # scaled, factors intact, no SMOTE
+saveRDS(df_train,       "data/train.rds")         # SMOTENC-balanced, scaled, factors intact
+saveRDS(df_train_small, "data/train_small.rds")   # partial SMOTE (0.5), for SVM
+saveRDS(df_test,        "data/test.rds")           # scaled, factors intact, no SMOTE
 
 # Save all the features
 saveRDS(selected_features, "data/candidate_features.rds")

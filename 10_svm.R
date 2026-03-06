@@ -19,14 +19,16 @@ library(pROC)
 set.seed(42)
 
 target      <- "icu_death_flag"
-N_FOLDS     <- 5
-SVM_TRAIN_N <- 15000
+N_FOLDS     <- 3
+SVM_TRAIN_N <- 10000
 
 # --- 1. load data and feature sets
-df_train <- readRDS("data/train.rds")
+#     Use partially-balanced train set (over_ratio=0.5) — smaller, faster for SVM
+df_train <- readRDS("data/train_small.rds")
 df_test  <- readRDS("data/test.rds")
 
 feature_sets <- list(
+  all      = readRDS("data/candidate_features.rds"),
   stepwise = readRDS("data/selected_features_stepwise.rds"),
   lasso    = readRDS("data/selected_features_lasso.rds"),
   elastic  = readRDS("data/selected_features_elastic.rds"),
@@ -48,8 +50,39 @@ compute_metrics <- function(actual, prob, threshold = 0.5) {
        NPV         = round(tn/(tn+fn), 4))
 }
 
-svm_cost_grid <- c(0.1, 1, 10)
-svm_gamma_grid  <- c(0.01, 0.1, 1)
+svm_cost_grid  <- c(0.1, 1, 10)
+svm_gamma_grid <- c(0.01, 0.1)
+
+# ------------- Runtime estimate (times 1 CV fit + 1 final fit, then extrapolates)
+cat("=== SVM Runtime Estimate ===\n")
+est_fs   <- feature_sets[[1]]
+est_cols <- c(est_fs, target)
+set.seed(99)
+est_idx  <- sample(nrow(df_train[, est_cols]), SVM_TRAIN_N)
+est_df   <- df_train[est_idx, est_cols]
+est_fold <- sample(rep(1:N_FOLDS, length.out = nrow(est_df)))
+
+t0 <- Sys.time()
+svm(as.formula(paste(target, "~ .")), data = est_df[est_fold != 1, ],
+    kernel = "radial", cost = 1, gamma = 0.1, probability = FALSE, scale = FALSE)
+cv_fit_sec <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+t0 <- Sys.time()
+svm(as.formula(paste(target, "~ .")), data = est_df,
+    kernel = "radial", cost = 1, gamma = 0.1, probability = TRUE, scale = FALSE)
+final_fit_sec <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+n_cv_total    <- length(feature_sets) * length(svm_cost_grid) * length(svm_gamma_grid) * N_FOLDS
+n_final_total <- length(feature_sets)
+est_min       <- (cv_fit_sec * n_cv_total + final_fit_sec * n_final_total) / 60
+
+cat(sprintf("  CV fit: %.1f sec | final fit: %.1f sec\n", cv_fit_sec, final_fit_sec))
+cat(sprintf("  Total fits: %d CV + %d final = %d\n", n_cv_total, n_final_total, n_cv_total + n_final_total))
+cat(sprintf("  Estimated runtime: %.1f min (%.1f hrs)\n", est_min, est_min / 60))
+cat("=== Starting full run ===\n\n")
+
+rm(est_fs, est_cols, est_idx, est_df, est_fold, cv_fit_sec, final_fit_sec,
+   n_cv_total, n_final_total, est_min)
 
 results <- data.frame()
 
@@ -87,14 +120,16 @@ for (fs_i in seq_along(feature_sets)) {
       combo_i <- combo_i + 1
       fold_aucs <- numeric(N_FOLDS)
       for (f in 1:N_FOLDS) {
+        # probability=FALSE + decision.values for CV: ~2x faster (skips Platt scaling)
+        # scale=FALSE: data already z-scored in 01_data_split.R
         fit      <- svm(as.formula(paste(target, "~ .")),
                         data        = df_svm[fold_idx != f, ],
                         kernel      = "radial", cost = c_val, gamma = g_val,
-                        probability = TRUE, scale = TRUE)
-        pred_val     <- predict(fit, df_svm[fold_idx == f, ], probability = TRUE)
-        prob         <- attr(pred_val, "probabilities")[, "Discharged"]
+                        probability = FALSE, scale = FALSE)
+        pred_val     <- predict(fit, df_svm[fold_idx == f, ], decision.values = TRUE)
+        dv           <- attr(pred_val, "decision.values")[, 1]
         actual_f     <- as.integer(df_svm[fold_idx == f, target] == "Discharged")
-        fold_aucs[f] <- as.numeric(auc(roc(actual_f, prob, quiet = TRUE)))
+        fold_aucs[f] <- as.numeric(auc(roc(actual_f, dv, quiet = TRUE)))
         fit_counter  <- fit_counter + 1
       }
       # progress for this combo
@@ -117,7 +152,7 @@ for (fs_i in seq_along(feature_sets)) {
   final_fit <- svm(as.formula(paste(target, "~ .")),
                    data        = df_svm,
                    kernel      = "radial", cost = best$cost, gamma = best$gamma,
-                   probability = TRUE, scale = TRUE)
+                   probability = TRUE, scale = FALSE)
   fit_counter <- fit_counter + 1
 
   pred_te <- predict(final_fit, df_te, probability = TRUE)
